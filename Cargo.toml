@@ -1,0 +1,32 @@
+[package]
+name = "loudness"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Automatic loudness normalization plugin for Visual Pinball — measures PinMAME ROM sound and PUP pack audio to EBU R128, then applies a per-source gain on the audio bus."
+repository = "https://github.com/Le-Syl21/loudness"
+keywords = ["visual-pinball", "loudness", "ebu-r128", "audio", "normalization"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+ebur128 = { version = "0.1.10", features = ["precision-true-peak"] }
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "wav",
+    "pcm",
+    "adpcm",
+    "mp3",
+    "flac",
+    "ogg",
+    "vorbis",
+    "isomp4",
+    "aac",
+    "opt-simd",
+] }
+anyhow = "1.0.104"
+csv = "1.4.0"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[lints.rust]
+missing_docs = "warn"
