@@ -6,8 +6,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use loudness::altsound::AltsoundPack;
 use loudness::cache::{ALGORITHM_VERSION, Cache, CacheEntry};
+use loudness::engine;
 use loudness::gain::{DEFAULT_CEILING_DBTP, DEFAULT_TARGET_LUFS, plan};
 use loudness::measure::SourceMeter;
+use loudness::stamp::{self, Stamp};
 
 #[derive(Parser)]
 #[command(version, about = "EBU R128 loudness normalization for Visual Pinball")]
@@ -48,15 +50,28 @@ enum Command {
         /// Correct the pack even though some of its sounds are missing.
         #[arg(long)]
         allow_missing: bool,
+        /// Measure and write again even if nothing has changed.
+        #[arg(long)]
+        force: bool,
     },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Scan { path, target, ceiling, verbose } => scan(&path, target, ceiling, verbose),
-        Command::Apply { path, target, ceiling, cache, allow_missing } => {
-            apply(&path, target, ceiling, &cache, allow_missing)
-        }
+        Command::Scan {
+            path,
+            target,
+            ceiling,
+            verbose,
+        } => scan(&path, target, ceiling, verbose),
+        Command::Apply {
+            path,
+            target,
+            ceiling,
+            cache,
+            allow_missing,
+            force,
+        } => apply(&path, target, ceiling, &cache, allow_missing, force),
     }
 }
 
@@ -75,7 +90,10 @@ fn locate_csv(path: &Path) -> Result<PathBuf> {
     match found.len() {
         0 => bail!("no csv in {}", path.display()),
         1 => Ok(found.remove(0)),
-        _ => bail!("{} holds several csv files, name the one to use", path.display()),
+        _ => bail!(
+            "{} holds several csv files, name the one to use",
+            path.display()
+        ),
     }
 }
 
@@ -119,15 +137,26 @@ fn measure_pack(csv_path: &Path, verbose: bool) -> Result<PackMeasurement> {
     if measured == 0 {
         bail!("nothing could be measured in {}", csv_path.display());
     }
-    Ok(PackMeasurement { meter, measured, listed })
+    Ok(PackMeasurement {
+        meter,
+        measured,
+        listed,
+    })
 }
 
 fn scan(path: &Path, target: f64, ceiling: f64, verbose: bool) -> Result<()> {
     let csv_path = locate_csv(path)?;
     println!("{}", csv_path.display());
-    let PackMeasurement { meter, measured, listed } = measure_pack(&csv_path, verbose)?;
+    let PackMeasurement {
+        meter,
+        measured,
+        listed,
+    } = measure_pack(&csv_path, verbose)?;
     if measured < listed {
-        println!("\n{} of the {listed} listed sounds could not be read", listed - measured);
+        println!(
+            "\n{} of the {listed} listed sounds could not be read",
+            listed - measured
+        );
     }
 
     let Some(source) = meter.source()? else {
@@ -136,13 +165,22 @@ fn scan(path: &Path, target: f64, ceiling: f64, verbose: bool) -> Result<()> {
     let plan = plan(source.lufs, meter.worst_true_peak(), target, ceiling);
 
     println!("\n{measured} sounds measured");
-    println!("  loudness      {:>8.1} LUFS  (target {target:.1})", source.lufs);
+    println!(
+        "  loudness      {:>8.1} LUFS  (target {target:.1})",
+        source.lufs
+    );
     println!("  range         {:>8.1} LU", source.lra);
-    println!("  worst peak    {:>8.1} dBTP (ceiling {ceiling:.1})", meter.worst_true_peak());
+    println!(
+        "  worst peak    {:>8.1} dBTP (ceiling {ceiling:.1})",
+        meter.worst_true_peak()
+    );
     println!("  gain wanted   {:>+8.1} dB", plan.wanted_db);
     println!("  gain possible {:>+8.1} dB", plan.applied_db);
     if plan.is_capped() {
-        println!("  capped by the true peak ceiling, {:.1} dB of headroom left", plan.headroom_db);
+        println!(
+            "  capped by the true peak ceiling, {:.1} dB of headroom left",
+            plan.headroom_db
+        );
     }
     Ok(())
 }
@@ -153,9 +191,32 @@ fn apply(
     ceiling: f64,
     cache_path: &Path,
     allow_missing: bool,
+    force: bool,
 ) -> Result<()> {
     let csv_path = locate_csv(path)?;
-    let PackMeasurement { meter, measured, listed } = measure_pack(&csv_path, false)?;
+    let dir = csv_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+    // Decide before measuring, not after: the whole point is to skip the scan.
+    let fingerprint = stamp::fingerprint(&AltsoundPack::load(&csv_path)?.sound_files())?;
+    let engine = engine::signature();
+    if !force
+        && let Some(previous) = Stamp::load(&dir)?
+        && previous.is_current(&fingerprint, engine, target, ceiling)
+    {
+        println!(
+            "{} is already normalized ({:+.1} dB in the pack, {:+.1} dB on the bus)",
+            dir.display(),
+            previous.written_db,
+            previous.residual_db
+        );
+        return Ok(());
+    }
+
+    let PackMeasurement {
+        meter,
+        measured,
+        listed,
+    } = measure_pack(&csv_path, false)?;
 
     // Correcting a pack from a fraction of its sounds would write a gain that
     // looks authoritative and is simply wrong, so it takes saying so out loud.
@@ -196,8 +257,25 @@ fn apply(
     });
     cache.save(cache_path)?;
 
+    Stamp {
+        fingerprint,
+        engine: engine.to_string(),
+        target_lufs: target,
+        ceiling_dbtp: ceiling,
+        lufs: source.lufs,
+        lra: source.lra,
+        true_peak_dbtp: meter.worst_true_peak(),
+        written_db: report.written_db,
+        residual_db: report.residual_db,
+        at: Stamp::now(),
+    }
+    .save(&dir)?;
+
     println!("{source_id}: {measured} sounds, {:.1} LUFS", source.lufs);
-    println!("  written to the csv  {:>+6.1} dB on {} entries", report.written_db, report.adjusted);
+    println!(
+        "  written to the csv  {:>+6.1} dB on {} entries",
+        report.written_db, report.adjusted
+    );
     if report.residual_db > 0.01 {
         println!(
             "  left for the bus    {:>+6.1} dB — set AudioSource.altsound.Gain accordingly",

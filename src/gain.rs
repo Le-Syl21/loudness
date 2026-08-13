@@ -47,7 +47,11 @@ pub fn plan(source_lufs: f64, worst_dbtp: f64, target_lufs: f64, ceiling_dbtp: f
     // A source whose peaks already sit above the ceiling has negative headroom,
     // which correctly forces the offset down rather than up.
     let applied_db = wanted_db.min(headroom_db);
-    GainPlan { wanted_db, applied_db, headroom_db }
+    GainPlan {
+        wanted_db,
+        applied_db,
+        headroom_db,
+    }
 }
 
 #[cfg(test)]

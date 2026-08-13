@@ -54,7 +54,8 @@ impl Cache {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_str(&text)?)
     }
 

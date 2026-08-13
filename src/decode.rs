@@ -47,7 +47,12 @@ impl Decoder {
         }
 
         let format = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .with_context(|| format!("probing {}", path.display()))?;
 
         let track = format
@@ -59,7 +64,11 @@ impl Decoder {
             bail!("{} has no audio codec parameters", path.display());
         };
         let sample_rate = params.sample_rate.context("unknown sample rate")?;
-        let channels = params.channels.as_ref().context("unknown channel layout")?.count() as u32;
+        let channels = params
+            .channels
+            .as_ref()
+            .context("unknown channel layout")?
+            .count() as u32;
 
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
@@ -69,7 +78,10 @@ impl Decoder {
             format,
             decoder,
             track_id,
-            spec: AudioSpec { sample_rate, channels },
+            spec: AudioSpec {
+                sample_rate,
+                channels,
+            },
             samples: Vec::new(),
         })
     }

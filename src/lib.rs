@@ -13,5 +13,7 @@
 pub mod altsound;
 pub mod cache;
 pub mod decode;
+pub mod engine;
 pub mod gain;
 pub mod measure;
+pub mod stamp;

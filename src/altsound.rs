@@ -60,7 +60,13 @@ impl AltsoundPack {
             bail!("{} lists no sound", path.display());
         }
 
-        Ok(Self { path: path.to_path_buf(), headers, records, gain_column, fname_column })
+        Ok(Self {
+            path: path.to_path_buf(),
+            headers,
+            records,
+            gain_column,
+            fname_column,
+        })
     }
 
     /// Paths of the wavs the pack refers to, in csv order.
@@ -81,12 +87,18 @@ impl AltsoundPack {
         let mut gains = Vec::with_capacity(self.records.len());
         for record in &self.records {
             let raw = record.get(self.gain_column).unwrap_or("").trim();
-            let gain: f64 = raw.parse().with_context(|| format!("gain {raw:?} is not a number"))?;
+            let gain: f64 = raw
+                .parse()
+                .with_context(|| format!("gain {raw:?} is not a number"))?;
             gains.push(gain);
         }
 
         let loudest = gains.iter().copied().fold(0.0_f64, f64::max);
-        let ceiling_factor = if loudest > 0.0 { MAX_GAIN / loudest } else { f64::INFINITY };
+        let ceiling_factor = if loudest > 0.0 {
+            MAX_GAIN / loudest
+        } else {
+            f64::INFINITY
+        };
         let effective = factor.min(ceiling_factor);
 
         for (record, gain) in self.records.iter_mut().zip(&gains) {

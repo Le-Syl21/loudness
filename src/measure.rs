@@ -36,12 +36,19 @@ pub struct SourceMeter {
     peak_dbtp: f64,
 }
 
-const MODE: Mode = Mode::I.union(Mode::LRA).union(Mode::TRUE_PEAK);
+/// What every meter in the project measures. Shared so the engine signature is
+/// computed under exactly the same conditions as real packs.
+pub const MODE: Mode = Mode::I.union(Mode::LRA).union(Mode::TRUE_PEAK);
 
 impl SourceMeter {
     /// A meter with nothing measured yet.
     pub fn new() -> Self {
-        Self { meter: None, spec: None, frames: 0, peak_dbtp: f64::NEG_INFINITY }
+        Self {
+            meter: None,
+            spec: None,
+            frames: 0,
+            peak_dbtp: f64::NEG_INFINITY,
+        }
     }
 
     /// Measure one file, add it to the source total, and return its own figures.
@@ -125,5 +132,9 @@ fn channel_true_peak(meter: &EbuR128, channels: u32) -> Result<f64> {
             worst = peak;
         }
     }
-    Ok(if worst > 0.0 { 20.0 * worst.log10() } else { f64::NEG_INFINITY })
+    Ok(if worst > 0.0 {
+        20.0 * worst.log10()
+    } else {
+        f64::NEG_INFINITY
+    })
 }
