@@ -25,16 +25,27 @@ pub struct ApplyReport {
     pub adjusted: usize,
     /// Offset actually written into the csv, in dB.
     pub written_db: f64,
-    /// Offset that did not fit in the column and belongs on the bus, in dB.
+    /// Offset that the pack cannot deliver, in dB.
     ///
-    /// The column tops out at 100, so a pack that needs a large boost cannot
-    /// get all of it here. Rather than clamp some entries and flatten the mix,
-    /// the whole pack is scaled by as much as fits and the remainder is handed
-    /// to `AudioSource.altsound.Gain`.
-    pub residual_db: f64,
+    /// Not a remainder to be applied elsewhere: there is nowhere else. The
+    /// column stops at 100, `group_vol` stops at 100, and both mean "the sample
+    /// at its own level", never a boost. The only other gain in the chain is
+    /// `AudioSource.AltSound.Gain`, which belongs to the user's mixer and is not
+    /// ours to write. So a pack that needs more than this is a pack whose level
+    /// is simply the ceiling of the whole system.
+    pub unreachable_db: f64,
+    /// Loudest this pack can ever play, in LUFS.
+    ///
+    /// The number that matters when choosing a target: no source can be aligned
+    /// above the quietest of these.
+    pub max_reachable_lufs: f64,
 }
 
 /// Upper bound of the AltSound gain column.
+///
+/// `100` means "unattenuated", not "+6 dB": libaltsound reads the field as
+/// `val > 100 ? 1.0 : val / 100`, so an AltSound pack can only ever come down
+/// from the level its samples were recorded at.
 const MAX_GAIN: f64 = 100.0;
 
 impl AltsoundPack {
@@ -82,8 +93,9 @@ impl AltsoundPack {
     /// Scale every gain by the same factor, and report what did not fit.
     ///
     /// The factor is reduced until the loudest entry still fits in the column,
-    /// so all the ratios between sounds are preserved.
-    pub fn apply_gain(&mut self, factor: f64) -> Result<ApplyReport> {
+    /// so all the ratios between sounds are preserved. `source_lufs` is only
+    /// used to report what the pack can reach at most.
+    pub fn apply_gain(&mut self, factor: f64, source_lufs: f64) -> Result<ApplyReport> {
         let mut gains = Vec::with_capacity(self.records.len());
         for record in &self.records {
             let raw = record.get(self.gain_column).unwrap_or("").trim();
@@ -111,7 +123,8 @@ impl AltsoundPack {
         Ok(ApplyReport {
             adjusted: self.records.len(),
             written_db: 20.0 * effective.log10(),
-            residual_db: 20.0 * (factor / effective).log10(),
+            unreachable_db: 20.0 * (factor / effective).log10(),
+            max_reachable_lufs: source_lufs + 20.0 * ceiling_factor.log10(),
         })
     }
 

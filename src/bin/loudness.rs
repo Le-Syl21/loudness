@@ -443,7 +443,7 @@ fn apply(
     let plan = plan(source.lufs, meter.worst_true_peak(), target, ceiling);
 
     let mut pack = AltsoundPack::load(&csv_path)?;
-    let report = pack.apply_gain(plan.linear())?;
+    let report = pack.apply_gain(plan.linear(), source.lufs)?;
     pack.save()?;
 
     let source_id = csv_path
@@ -461,7 +461,7 @@ fn apply(
         target_lufs: target,
         ceiling_dbtp: ceiling,
         written_db: report.written_db,
-        residual_db: report.residual_db,
+        residual_db: report.unreachable_db,
         file_count: measured,
         algorithm_version: ALGORITHM_VERSION,
     });
@@ -476,7 +476,7 @@ fn apply(
         lra: source.lra,
         true_peak_dbtp: meter.worst_true_peak(),
         written_db: report.written_db,
-        residual_db: report.residual_db,
+        residual_db: report.unreachable_db,
         at: Stamp::now(),
     }
     .save(&dir)?;
@@ -486,11 +486,16 @@ fn apply(
         "  written to the csv  {:>+6.1} dB on {} entries",
         report.written_db, report.adjusted
     );
-    if report.residual_db > 0.01 {
+    println!(
+        "  loudest possible    {:>6.1} LUFS",
+        report.max_reachable_lufs
+    );
+    if report.unreachable_db > 0.01 {
         println!(
-            "  left for the bus    {:>+6.1} dB — set AudioSource.altsound.Gain accordingly",
-            report.residual_db
+            "  short of the target {:>+6.1} dB — an AltSound pack can only be attenuated,",
+            report.unreachable_db
         );
+        println!("                      so this pack caps the target of the whole system");
     }
     if plan.is_capped() {
         println!("  the target was not reached: true peak ceiling reached first");
