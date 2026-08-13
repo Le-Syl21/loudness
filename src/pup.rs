@@ -108,10 +108,13 @@ mod columns {
 
 /// Ceiling for a written volume.
 ///
-/// The format allows more — packs in the wild use 200 — but a correction that
-/// needs a bigger boost than this is telling us the clip is simply too quiet to
-/// rescue by gain, and pushing further would only add clipping.
-pub const MAX_VOLUME: f64 = 400.0;
+/// Not a limit of the format: the volume travels from `triggers.pup` to
+/// `SDL_SetAudioStreamGain` without ever being clamped, so a percentage above
+/// 100 really does amplify. Only the true peak ceiling bounds a boost, and it
+/// bounds it for a physical reason. This value is a guard against absurdity —
+/// a clip needing more than a twentyfold gain is broken, not quiet — and it is
+/// deliberately far from anything a real correction reaches.
+pub const MAX_VOLUME: f64 = 2000.0;
 
 /// Read a percentage, defaulting to full scale when the field is empty.
 fn volume_of(record: &csv::StringRecord, index: usize) -> f64 {
@@ -218,6 +221,7 @@ impl PupPack {
     ///
     /// The floor is 1, never 0: zero is how a pack says "silent", and turning a
     /// quiet clip into a silent one is not a correction, it is a deletion.
+    /// There is no meaningful ceiling on the other side — see [`MAX_VOLUME`].
     ///
     /// Returns false when the line could not be edited in place, which is the
     /// signal to leave it alone rather than to rewrite it some other way.
