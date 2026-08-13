@@ -1,10 +1,8 @@
-//! Audio decoding, kept behind a trait so the backend can be swapped.
+//! Audio decoding.
 //!
-//! The default backend is Symphonia, which is pure Rust and covers everything
-//! the pinball world uses: wav and adpcm for AltSound packs and table samples,
-//! mp4/aac for PUP pack videos, mp3/ogg/flac for the music folder. A backend
-//! built on FFmpeg can be added later for the exotic cases (HE-AAC, AC-3)
-//! without touching the callers.
+//! Symphonia is pure Rust and covers what the pinball world uses: wav and adpcm
+//! for AltSound packs and table samples, mp4/aac for PUP pack videos, mp3, ogg
+//! and flac for the music folder.
 
 use std::fs::File;
 use std::path::Path;
@@ -18,7 +16,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-/// What a decoder reports about the stream it is about to produce.
+/// What a decoder reports about the stream it produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioSpec {
     /// Frames per second.
@@ -27,17 +25,9 @@ pub struct AudioSpec {
     pub channels: u32,
 }
 
-/// A source of interleaved `f32` frames, which is what the loudness meter eats.
-pub trait Decode {
-    /// The stream layout.
-    fn spec(&self) -> AudioSpec;
-
-    /// Next block of interleaved samples, or `None` at end of stream.
-    fn next_block(&mut self) -> Result<Option<&[f32]>>;
-}
-
-/// Symphonia-backed decoder.
-pub struct SymphoniaDecoder {
+/// Decodes a media file into interleaved `f32` frames, which is what the
+/// loudness meter eats.
+pub struct Decoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
@@ -45,7 +35,7 @@ pub struct SymphoniaDecoder {
     samples: Vec<f32>,
 }
 
-impl SymphoniaDecoder {
+impl Decoder {
     /// Open a media file and read enough of it to know its layout.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -83,14 +73,14 @@ impl SymphoniaDecoder {
             samples: Vec::new(),
         })
     }
-}
 
-impl Decode for SymphoniaDecoder {
-    fn spec(&self) -> AudioSpec {
+    /// The stream layout.
+    pub fn spec(&self) -> AudioSpec {
         self.spec
     }
 
-    fn next_block(&mut self) -> Result<Option<&[f32]>> {
+    /// Next block of interleaved samples, or `None` at end of stream.
+    pub fn next_block(&mut self) -> Result<Option<&[f32]>> {
         loop {
             let Some(packet) = self.format.next_packet()? else {
                 return Ok(None);

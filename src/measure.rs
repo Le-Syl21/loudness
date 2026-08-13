@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use ebur128::{EbuR128, Mode};
 
-use crate::decode::{Decode, SymphoniaDecoder};
+use crate::decode::Decoder;
 
 /// What R128 says about one file, or about a whole set of them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,7 +46,7 @@ impl SourceMeter {
 
     /// Measure one file, add it to the source total, and return its own figures.
     pub fn add_file(&mut self, path: &Path) -> Result<Measurement> {
-        let mut decoder = SymphoniaDecoder::open(path)?;
+        let mut decoder = Decoder::open(path)?;
         let spec = decoder.spec();
 
         let mut single = EbuR128::new(spec.channels, spec.sample_rate, MODE)
