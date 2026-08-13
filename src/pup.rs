@@ -80,6 +80,16 @@ pub struct PupPack {
     pub triggers: Vec<Trigger>,
     /// Playlists, by folder name in lowercase.
     pub playlists: HashMap<String, Playlist>,
+    /// Every line of `triggers.pup` as it was read, terminator excluded.
+    ///
+    /// Kept as text rather than as parsed records so a rewrite changes the
+    /// bytes we mean to change and nothing else. Round-tripping through a csv
+    /// writer would drop the quotes the author put around every description and
+    /// turn CRLF into LF — 143 rewritten lines to correct four volumes, on a
+    /// file that belongs to someone else.
+    trigger_lines: Vec<String>,
+    /// Line terminator the file uses, reused verbatim when writing it back.
+    trigger_eol: &'static str,
 }
 
 /// Column indices, fixed by the PuP Pack Editor format.
@@ -95,6 +105,13 @@ mod columns {
     /// See above.
     pub const PLAYLIST_VOLUME: usize = 5;
 }
+
+/// Ceiling for a written volume.
+///
+/// The format allows more — packs in the wild use 200 — but a correction that
+/// needs a bigger boost than this is telling us the clip is simply too quiet to
+/// rescue by gain, and pushing further would only add clipping.
+pub const MAX_VOLUME: f64 = 400.0;
 
 /// Read a percentage, defaulting to full scale when the field is empty.
 fn volume_of(record: &csv::StringRecord, index: usize) -> f64 {
@@ -141,9 +158,15 @@ impl PupPack {
             .from_path(&triggers_path)
             .with_context(|| format!("reading {}", triggers_path.display()))?;
 
+        let trigger_records = reader.records().collect::<Result<Vec<_>, _>>()?;
+
+        let text = std::fs::read_to_string(&triggers_path)
+            .with_context(|| format!("reading {}", triggers_path.display()))?;
+        let trigger_eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let trigger_lines: Vec<String> = text.split(trigger_eol).map(str::to_string).collect();
+
         let mut triggers = Vec::new();
-        for (row, record) in reader.records().enumerate() {
-            let record = record?;
+        for (row, record) in trigger_records.iter().enumerate() {
             let playlist = record.get(columns::TRIGGER_PLAYLIST).unwrap_or("").trim();
             let play_file = record.get(columns::TRIGGER_PLAYFILE).unwrap_or("").trim();
             // A trigger with no playlist is a comment or a separator.
@@ -154,7 +177,7 @@ impl PupPack {
                 row,
                 playlist: playlist.to_string(),
                 play_file: (!play_file.is_empty()).then(|| play_file.to_string()),
-                volume: volume_of(&record, columns::TRIGGER_VOLUME),
+                volume: volume_of(record, columns::TRIGGER_VOLUME),
             });
         }
 
@@ -162,7 +185,69 @@ impl PupPack {
             dir: dir.to_path_buf(),
             triggers,
             playlists,
+            trigger_lines,
+            trigger_eol,
         })
+    }
+
+    /// Media files a trigger can play, existing on disk.
+    pub fn trigger_files(&self, trigger: &Trigger) -> Vec<PathBuf> {
+        let folder = self.dir.join(&trigger.playlist);
+        match &trigger.play_file {
+            Some(name) => {
+                let path = folder.join(name);
+                if path.exists() {
+                    vec![path]
+                } else {
+                    Vec::new()
+                }
+            }
+            None => media_files(&folder),
+        }
+    }
+
+    /// Volume a folder carries, as a percentage.
+    pub fn playlist_volume(&self, playlist: &str) -> f64 {
+        self.playlists
+            .get(&playlist.to_lowercase())
+            .map(|p| p.volume)
+            .unwrap_or(100.0)
+    }
+
+    /// Set the volume of one trigger row.
+    ///
+    /// The floor is 1, never 0: zero is how a pack says "silent", and turning a
+    /// quiet clip into a silent one is not a correction, it is a deletion.
+    ///
+    /// Returns false when the line could not be edited in place, which is the
+    /// signal to leave it alone rather than to rewrite it some other way.
+    pub fn set_trigger_volume(&mut self, row: usize, volume: f64) -> bool {
+        let clamped = volume.round().clamp(1.0, MAX_VOLUME);
+        // Row 0 of the records is line 1 of the file, after the header.
+        let Some(line) = self.trigger_lines.get(row + 1) else {
+            return false;
+        };
+        match replace_field(line, columns::TRIGGER_VOLUME, &format!("{clamped:.0}")) {
+            Some(edited) => {
+                self.trigger_lines[row + 1] = edited;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Write `triggers.pup` back, keeping a `.bak` of the original.
+    pub fn save_triggers(&self) -> Result<()> {
+        let path = self.dir.join("triggers.pup");
+        let backup = self.dir.join("triggers.pup.bak");
+        if !backup.exists() {
+            std::fs::copy(&path, &backup)
+                .with_context(|| format!("backing up to {}", backup.display()))?;
+        }
+
+        std::fs::write(&path, self.trigger_lines.join(self.trigger_eol))
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
     }
 
     /// Clips worth measuring: those that exist on disk and are not silenced.
@@ -216,4 +301,60 @@ fn media_files(folder: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// Replace one comma-separated field of a line, leaving every byte around it
+/// untouched — quoting, spacing and all.
+///
+/// Returns `None` if the line has no such field, so the caller can skip it
+/// instead of writing something it did not intend.
+fn replace_field(line: &str, index: usize, value: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut field = 0;
+    let mut start = 0;
+    let mut quoted = false;
+
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                if field == index {
+                    return Some(format!("{}{}{}", &line[..start], value, &line[i..]));
+                }
+                field += 1;
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    (field == index).then(|| format!("{}{}", &line[..start], value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_field_is_replaced_without_touching_the_rest() {
+        let line = r#"18,1,"Ball Lost",E100,4,"Ball Lost",,200,20,,,,SkipSamePrty,0"#;
+        let edited = replace_field(line, 7, "150").unwrap();
+        assert_eq!(
+            edited,
+            r#"18,1,"Ball Lost",E100,4,"Ball Lost",,150,20,,,,SkipSamePrty,0"#
+        );
+    }
+
+    #[test]
+    fn a_comma_inside_quotes_does_not_shift_the_columns() {
+        let line = r#"3,1,"Watch out, they are coming",D0,2,Backglass,"a.mp4",100,1"#;
+        let edited = replace_field(line, 7, "42").unwrap();
+        assert!(edited.contains(r#""Watch out, they are coming""#));
+        assert!(edited.ends_with(",42,1"));
+    }
+
+    #[test]
+    fn a_missing_field_is_refused_rather_than_invented() {
+        assert!(replace_field("1,2,3", 7, "100").is_none());
+    }
 }

@@ -17,4 +17,6 @@ pub mod engine;
 pub mod gain;
 pub mod measure;
 pub mod pup;
+pub mod pup_gain;
+pub mod pup_measure;
 pub mod stamp;

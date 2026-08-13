@@ -1,18 +1,18 @@
 //! Command line front end: measure an AltSound pack, and optionally correct it.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use loudness::altsound::AltsoundPack;
 use loudness::cache::{ALGORITHM_VERSION, Cache, CacheEntry};
-use loudness::decode::NoAudioTrack;
 use loudness::engine;
 use loudness::gain::{DEFAULT_CEILING_DBTP, DEFAULT_TARGET_LUFS, plan};
 use loudness::measure::SourceMeter;
-use loudness::pup::PupPack;
+use loudness::pup::{MAX_VOLUME, PupPack};
+use loudness::pup_measure::{SkipCounts, TriggerLevel};
 use loudness::stamp::{self, Stamp};
+use loudness::{pup_gain, pup_measure};
 
 #[derive(Parser)]
 #[command(version, about = "EBU R128 loudness normalization for Visual Pinball")]
@@ -65,9 +65,24 @@ enum Command {
         /// clip is called an outlier.
         #[arg(long, default_value_t = 6.0)]
         band: f64,
-        /// List every clip measured.
+        /// List every trigger measured.
         #[arg(long)]
         verbose: bool,
+    },
+    /// Measure a PUP pack and write the corrected volumes into triggers.pup.
+    PupApply {
+        /// Folder holding triggers.pup.
+        path: PathBuf,
+        /// Half-width of the band around the median, in LU. Outliers are
+        /// pulled back to its edge, never onto the median.
+        #[arg(long, default_value_t = 6.0)]
+        band: f64,
+        /// True peak ceiling, in dBTP.
+        #[arg(long, default_value_t = DEFAULT_CEILING_DBTP)]
+        ceiling: f64,
+        /// Measure and write again even if nothing has changed.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -92,119 +107,181 @@ fn main() -> Result<()> {
             band,
             verbose,
         } => pup_scan(&path, band, verbose),
+        Command::PupApply {
+            path,
+            band,
+            ceiling,
+            force,
+        } => pup_apply(&path, band, ceiling, force),
     }
 }
 
-/// Measure every clip of a PUP pack and describe the spread.
+/// Measure a PUP pack and describe how spread out it is.
 ///
 /// The number that matters is not a clip's own loudness but the loudness it
 /// reaches once the pack's own `Volume` is applied — that is what the player
 /// hears, and what an author has already tuned by hand.
 fn pup_scan(dir: &Path, band: f64, verbose: bool) -> Result<()> {
     let pack = PupPack::load(dir)?;
-    let clips = pack.clips();
     println!(
-        "{}: {} triggers, {} clips on disk, {} playlists",
+        "{}: {} triggers, {} playlists",
         dir.display(),
         pack.triggers.len(),
-        clips.len(),
         pack.playlists.len()
     );
 
-    let mut seen: HashMap<PathBuf, f64> = HashMap::new();
-    let mut measured: Vec<(PathBuf, f64, f64, f64)> = Vec::new();
-    let mut silent = 0;
-    let mut no_audio = 0;
-    let mut unreadable = 0;
-
-    for clip in &clips {
-        if clip.effective_volume() <= 0.0 {
-            silent += 1;
-            continue;
-        }
-        if let Some(previous) = seen.get(&clip.path) {
-            if (*previous - clip.effective_volume()).abs() > 0.01 {
-                println!(
-                    "  note: {} is played at {:.0}% and at {:.0}%",
-                    clip.path.file_name().unwrap_or_default().to_string_lossy(),
-                    previous,
-                    clip.effective_volume()
-                );
-            }
-            continue;
-        }
-        seen.insert(clip.path.clone(), clip.effective_volume());
-
-        let mut meter = SourceMeter::new();
-        match meter.add_file(&clip.path) {
-            // A clip whose audio track holds nothing but silence measures as
-            // minus infinity. It carries no level, so it belongs with the
-            // silent ones rather than dragging the median down.
-            Ok(m) if !m.lufs.is_finite() => silent += 1,
-            Ok(m) => {
-                let effective = m.lufs + clip.volume_db();
-                measured.push((
-                    clip.path.clone(),
-                    m.lufs,
-                    clip.effective_volume(),
-                    effective,
-                ));
-            }
-            Err(e) if e.downcast_ref::<NoAudioTrack>().is_some() => no_audio += 1,
-            Err(e) => {
-                unreadable += 1;
-                eprintln!("  unreadable {}: {e:#}", clip.path.display());
-            }
-        }
-    }
-
-    if measured.is_empty() {
+    let (levels, skipped) = pup_measure::measure(&pack)?;
+    if levels.is_empty() {
         bail!("no clip could be measured in {}", dir.display());
     }
 
-    measured.sort_by(|a, b| a.3.total_cmp(&b.3));
+    let mut effective: Vec<f64> = levels.iter().map(TriggerLevel::effective_lufs).collect();
+    let median = pup_measure::median(&mut effective);
+
     if verbose {
+        let mut sorted = levels.clone();
+        sorted.sort_by(|a, b| a.effective_lufs().total_cmp(&b.effective_lufs()));
         println!();
-        for (path, lufs, volume, effective) in &measured {
+        for level in &sorted {
             println!(
                 "  {:<44} {:>7.1} LUFS  x{:>4.0}%  ->{:>7.1}",
-                path.file_name().unwrap_or_default().to_string_lossy(),
-                lufs,
-                volume,
-                effective
+                level.label,
+                level.lufs,
+                level.volume,
+                level.effective_lufs()
             );
         }
     }
 
-    let levels: Vec<f64> = measured.iter().map(|m| m.3).collect();
-    let median = levels[levels.len() / 2];
-    let outliers: Vec<&(PathBuf, f64, f64, f64)> = measured
-        .iter()
-        .filter(|m| (m.3 - median).abs() > band)
-        .collect();
+    report_spread(&levels, median, band, skipped);
 
-    println!(
-        "\n{} clips measured, {silent} silent by design, {no_audio} without an audio track, {unreadable} unreadable",
-        levels.len()
-    );
-    println!("  quietest      {:>8.1} LUFS", levels[0]);
-    println!("  median        {:>8.1} LUFS", median);
-    println!("  loudest       {:>8.1} LUFS", levels[levels.len() - 1]);
-    println!(
-        "  spread        {:>8.1} LU",
-        levels[levels.len() - 1] - levels[0]
-    );
-    println!("  outside ±{band:.0} LU  {:>5} clips", outliers.len());
-
-    for (path, _, volume, effective) in outliers.iter().take(10) {
+    let changes = pup_gain::plan(&levels, median, band, DEFAULT_CEILING_DBTP, MAX_VOLUME);
+    println!("\n{} triggers would be adjusted", changes.len());
+    for change in changes.iter().take(12) {
         println!(
-            "    {:<44} {:>7.1} LUFS at {:.0}%  ({:+.1} LU)",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            effective,
-            volume,
-            effective - median
+            "    {:<44} {:>4.0}% -> {:>4.0}%  ({:+.1} LU off)",
+            change.label, change.from, change.to, change.was_off_by
         );
     }
+    Ok(())
+}
+
+/// Print the spread of a measured pack.
+fn report_spread(levels: &[TriggerLevel], median: f64, band: f64, skipped: SkipCounts) {
+    let mut effective: Vec<f64> = levels.iter().map(TriggerLevel::effective_lufs).collect();
+    effective.sort_by(f64::total_cmp);
+    let outliers = effective
+        .iter()
+        .filter(|v| (**v - median).abs() > band)
+        .count();
+
+    println!(
+        "\n{} triggers measured, {} muted by the pack, {} with nothing measurable",
+        levels.len(),
+        skipped.muted_triggers,
+        skipped.empty_triggers
+    );
+    println!(
+        "  files skipped: {} silent, {} without an audio track, {} unreadable",
+        skipped.silent_files, skipped.no_audio, skipped.unreadable
+    );
+    println!("  quietest      {:>8.1} LUFS", effective[0]);
+    println!("  median        {:>8.1} LUFS", median);
+    println!(
+        "  loudest       {:>8.1} LUFS",
+        effective[effective.len() - 1]
+    );
+    println!(
+        "  spread        {:>8.1} LU",
+        effective[effective.len() - 1] - effective[0]
+    );
+    println!("  outside ±{band:.0} LU  {outliers:>5} triggers");
+}
+
+/// Measure a PUP pack and write the corrected volumes into triggers.pup.
+fn pup_apply(dir: &Path, band: f64, ceiling: f64, force: bool) -> Result<()> {
+    let mut pack = PupPack::load(dir)?;
+
+    let media: Vec<PathBuf> = pack
+        .triggers
+        .iter()
+        .flat_map(|t| pack.trigger_files(t))
+        .collect();
+    let fingerprint = stamp::fingerprint(&media)?;
+    let engine = engine::signature();
+    if !force
+        && let Some(previous) = Stamp::load(dir)?
+        && previous.is_current(&fingerprint, engine, band, ceiling)
+    {
+        println!(
+            "{} is already balanced (median {:.1} LUFS, band ±{:.0} LU)",
+            dir.display(),
+            previous.lufs,
+            band
+        );
+        return Ok(());
+    }
+
+    let (levels, skipped) = pup_measure::measure(&pack)?;
+    if levels.is_empty() {
+        bail!("no clip could be measured in {}", dir.display());
+    }
+    let mut effective: Vec<f64> = levels.iter().map(TriggerLevel::effective_lufs).collect();
+    let median = pup_measure::median(&mut effective);
+    report_spread(&levels, median, band, skipped);
+
+    let changes = pup_gain::plan(&levels, median, band, ceiling, MAX_VOLUME);
+    let mut written = 0;
+    for change in &changes {
+        if !pack.set_trigger_volume(change.row, change.to) {
+            eprintln!(
+                "    skipped row {}: its volume field could not be edited",
+                change.row
+            );
+            continue;
+        }
+        written += 1;
+        println!(
+            "    {:<44} {:>4.0}% -> {:>4.0}%  ({:+.1} LU off){}",
+            change.label,
+            change.from,
+            change.to,
+            change.was_off_by,
+            if change.refused_db > 0.1 {
+                format!(
+                    ", {:.1} dB refused to stay under the ceiling",
+                    change.refused_db
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    if written == 0 {
+        println!("\nnothing to change");
+    } else {
+        pack.save_triggers()?;
+        println!("\n{written} triggers rewritten, original kept as triggers.pup.bak");
+    }
+
+    let worst_peak = levels
+        .iter()
+        .map(|l| l.true_peak_dbtp)
+        .fold(f64::NEG_INFINITY, f64::max);
+    Stamp {
+        fingerprint,
+        engine: engine.to_string(),
+        target_lufs: band,
+        ceiling_dbtp: ceiling,
+        lufs: median,
+        lra: effective[effective.len() - 1] - effective[0],
+        true_peak_dbtp: worst_peak,
+        written_db: 0.0,
+        residual_db: 0.0,
+        at: Stamp::now(),
+    }
+    .save(dir)?;
     Ok(())
 }
 
