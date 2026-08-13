@@ -2,7 +2,7 @@
 name = "loudness"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "Automatic loudness normalization plugin for Visual Pinball — measures PinMAME ROM sound and PUP pack audio to EBU R128, then applies a per-source gain on the audio bus."
 repository = "https://github.com/Le-Syl21/loudness"
 keywords = ["visual-pinball", "loudness", "ebu-r128", "audio", "normalization"]
