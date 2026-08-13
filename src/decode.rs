@@ -16,6 +16,23 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
+/// The file carries no audio track at all.
+///
+/// Worth its own type rather than a message: a PUP pack is full of decorative
+/// videos with no sound, and calling those "unreadable" would both alarm the
+/// user and drown the packs that genuinely fail to decode — the ones actually
+/// worth reporting.
+#[derive(Debug)]
+pub struct NoAudioTrack;
+
+impl std::fmt::Display for NoAudioTrack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no audio track")
+    }
+}
+
+impl std::error::Error for NoAudioTrack {}
+
 /// What a decoder reports about the stream it produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioSpec {
@@ -55,9 +72,9 @@ impl Decoder {
             )
             .with_context(|| format!("probing {}", path.display()))?;
 
-        let track = format
-            .first_track(TrackType::Audio)
-            .with_context(|| format!("{} has no audio track", path.display()))?;
+        let Some(track) = format.first_track(TrackType::Audio) else {
+            return Err(NoAudioTrack.into());
+        };
         let track_id = track.id;
 
         let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
