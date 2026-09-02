@@ -1,0 +1,18 @@
+version: 2
+
+# No CI here yet, so a Dependabot PR is not validated by anything — read the
+# diff before merging. It is still worth having: it is how a RUSTSEC advisory
+# on a dependency turns into something actionable rather than a silent alert.
+updates:
+  # One grouped PR a month for the routine bumps, and a separate PR per major,
+  # so a breaking change never holds the rest of them hostage.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      crates:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: chore
