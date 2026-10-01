@@ -291,6 +291,43 @@ fn the_manifest_counts_every_frame() {
 }
 
 #[test]
+fn old_tables_reach_the_backglass_by_name() {
+    let dir = scratch("legacy");
+    let routed = |version: u32| -> Vec<OutputTarget> {
+        let pcm = || wave_form(1, 1, 8000, 16);
+        let mut flagged = sound("flagged", "flagged.wav", pcm(), pcm16_sine(10, 8000));
+        flagged.output_target = VpxOutputTarget::Backglass;
+        let sounds = vec![
+            sound("BGOut_Theme", "theme.wav", pcm(), pcm16_sine(10, 8000)),
+            sound("ding", "* backglass output *", pcm(), pcm16_sine(10, 8000)),
+            sound("plain", "plain.wav", pcm(), pcm16_sine(10, 8000)),
+            flagged,
+        ];
+        let vpx = VPX {
+            version: Version::new(version),
+            gamedata: GameData {
+                sounds_size: sounds.len() as u32,
+                ..Default::default()
+            },
+            sounds,
+            ..Default::default()
+        };
+        let table = dir.join(format!("Table {version}.vpx"));
+        vpx::write(&table, &vpx).unwrap();
+        let manifest = table_sounds::extract(&table, &dir.join(version.to_string()), false);
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest.vpx_version, version);
+        manifest.sounds.iter().map(|s| s.output_target).collect()
+    };
+
+    use OutputTarget::{Backglass, Table};
+    // Before 1031 the name and the path chose the backglass too.
+    assert_eq!(routed(1030), [Backglass, Backglass, Table, Backglass]);
+    // From 1031 on only the stored setting does.
+    assert_eq!(routed(1080), [Table, Table, Table, Backglass]);
+}
+
+#[test]
 fn a_folder_in_use_takes_force() {
     let dir = scratch("force");
     let table = fixture_table(&dir);

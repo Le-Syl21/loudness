@@ -40,6 +40,11 @@ pub const VPIN_VERSION: &str = env!("VPIN_VERSION");
 /// extension, and a sound name that long is a sentence, not a name.
 const MAX_STEM_BYTES: usize = 120;
 
+/// First table file version whose sounds store their output, volume, pan and
+/// fade (`NEW_SOUND_FORMAT_VERSION` in vpinball). An older sound stores only a
+/// backglass flag.
+const NEW_SOUND_FORMAT_VERSION: u32 = 1031;
+
 /// What an extraction produced, written as [`MANIFEST_FILE`] in the folder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -107,6 +112,9 @@ pub struct SoundEntry {
     /// Not a gain of its own: vpinball divides it by 100 and adds it to the
     /// volume the script passes to `PlaySound`. The sum is clamped to 0..1, and
     /// the amplitude applied is its square root.
+    ///
+    /// A table older than 1031 stores no volume, pan or fade: all three are 0
+    /// here, which is what vpinball 10.8 plays them at.
     pub volume: i32,
     /// Left/right pan set in the sound manager, in percent, -100 (left) to 100
     /// (right), added to the pan passed to `PlaySound` the same way.
@@ -115,7 +123,8 @@ pub struct SoundEntry {
     /// 100 (front), added to the fade passed to `PlaySound`. Only used for
     /// sounds played on the table output.
     pub fade: i32,
-    /// Device the sound plays on.
+    /// Device the sound plays on, as vpinball decides it when loading the
+    /// table.
     pub output_target: OutputTarget,
     /// Index of an earlier sound with the same name, ignoring ASCII case.
     ///
@@ -314,6 +323,7 @@ pub fn extract(table: &Path, out_dir: &Path, force: bool) -> Result<Manifest> {
             file,
             &path,
             shadowed[index],
+            output_target(sound, vpx_version.u32()),
         ));
     }
 
@@ -439,6 +449,26 @@ fn shadowed_by(sounds: &[SoundData]) -> Vec<Option<usize>> {
         .collect()
 }
 
+/// Device vpinball plays a sound on (`Sound::CreateFromStream`).
+///
+/// A table older than [`NEW_SOUND_FORMAT_VERSION`] stores only a backglass
+/// flag, and vpinball also sends a sound to the backglass when its name
+/// contains `bgout_` or its path is `* Backglass Output *`, ignoring case: how
+/// tables chose the backglass before the flag existed.
+fn output_target(sound: &SoundData, vpx_version: u32) -> OutputTarget {
+    if vpx_version >= NEW_SOUND_FORMAT_VERSION {
+        return OutputTarget::from(&sound.output_target);
+    }
+    let flagged = !matches!(sound.output_target, vpx_sound::OutputTarget::Table);
+    let legacy = sound.name.to_ascii_lowercase().contains("bgout_")
+        || sound.path.eq_ignore_ascii_case("* Backglass Output *");
+    if flagged || legacy {
+        OutputTarget::Backglass
+    } else {
+        OutputTarget::Table
+    }
+}
+
 /// Gather what the manifest says about one written sound.
 fn describe(
     index: usize,
@@ -447,6 +477,7 @@ fn describe(
     file: String,
     path: &Path,
     shadowed_by: Option<usize>,
+    output_target: OutputTarget,
 ) -> SoundEntry {
     // Only a sound stored as samples carries a header; the one vpin returns
     // for any other sound is a placeholder.
@@ -496,7 +527,7 @@ fn describe(
         volume: sound.volume as i32,
         balance: sound.balance as i32,
         fade: sound.fade as i32,
-        output_target: OutputTarget::from(&sound.output_target),
+        output_target,
         shadowed_by,
         bytes: written.bytes.len() as u64,
         blake3: format!("blake3:{}", blake3::hash(&written.bytes).to_hex()),
