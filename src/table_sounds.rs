@@ -292,7 +292,8 @@ pub fn default_out_dir(table: &Path) -> PathBuf {
 ///
 /// A folder that is not empty is refused unless `force` is set. With it, the
 /// files a previous manifest lists are removed first, so a sound that left
-/// the table does not linger; anything else in the folder is left alone.
+/// the table does not linger; any other file stays, unless a sound is written
+/// under its very name.
 ///
 /// The manifest is written last, so a folder without one is an extraction
 /// that did not finish.

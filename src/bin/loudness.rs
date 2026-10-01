@@ -95,7 +95,8 @@ enum Command {
         /// Folder to write into. Defaults to <table>.sounds next to the table.
         out_dir: Option<PathBuf>,
         /// Write into a folder that is not empty. Files a previous extraction
-        /// listed are replaced, nothing else is touched.
+        /// listed are removed first; any other file stays, unless a sound is
+        /// written under its name.
         #[arg(long)]
         force: bool,
         /// List every sound extracted.
