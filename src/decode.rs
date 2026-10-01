@@ -49,6 +49,8 @@ pub struct Decoder {
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     spec: AudioSpec,
+    bits_per_sample: Option<u32>,
+    damaged_packets: u64,
     samples: Vec<f32>,
 }
 
@@ -86,6 +88,7 @@ impl Decoder {
             .as_ref()
             .context("unknown channel layout")?
             .count() as u32;
+        let bits_per_sample = params.bits_per_sample;
 
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
@@ -99,6 +102,8 @@ impl Decoder {
                 sample_rate,
                 channels,
             },
+            bits_per_sample,
+            damaged_packets: 0,
             samples: Vec::new(),
         })
     }
@@ -106,6 +111,20 @@ impl Decoder {
     /// The stream layout.
     pub fn spec(&self) -> AudioSpec {
         self.spec
+    }
+
+    /// Bits per sample of the source, for the codecs that have such a thing:
+    /// PCM and FLAC do, MP3 and Vorbis do not.
+    pub fn bits_per_sample(&self) -> Option<u32> {
+        self.bits_per_sample
+    }
+
+    /// Packets skipped so far because they failed to decode.
+    ///
+    /// Anything but zero means the frames read are fewer than the stream
+    /// holds: harmless for a loudness figure, not for an exact frame count.
+    pub fn damaged_packets(&self) -> u64 {
+        self.damaged_packets
     }
 
     /// Next block of interleaved samples, or `None` at end of stream.
@@ -126,7 +145,10 @@ impl Decoder {
                 }
                 // A damaged packet is worth skipping, not worth failing on: one
                 // bad frame in a 500-file pack should not lose the measurement.
-                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(SymphoniaError::DecodeError(_)) => {
+                    self.damaged_packets += 1;
+                    continue;
+                }
                 Err(e) => return Err(e.into()),
             }
         }
