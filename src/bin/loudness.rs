@@ -1,6 +1,8 @@
 //! Command line front end: measure an AltSound pack, and optionally correct it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -12,6 +14,7 @@ use loudness::measure::SourceMeter;
 use loudness::pup::{MAX_VOLUME, PupPack};
 use loudness::pup_measure::{SkipCounts, TriggerLevel};
 use loudness::stamp::{self, Stamp};
+use loudness::table_sounds::{self, MANIFEST_FILE, Manifest, OutputTarget};
 use loudness::{pup_gain, pup_measure};
 
 #[derive(Parser)]
@@ -84,6 +87,21 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Extract the sounds a .vpx table carries into a folder, untouched, with
+    /// a manifest.
+    Extract {
+        /// The .vpx table.
+        table: PathBuf,
+        /// Folder to write into. Defaults to <table>.sounds next to the table.
+        out_dir: Option<PathBuf>,
+        /// Write into a folder that is not empty. Files a previous extraction
+        /// listed are replaced, nothing else is touched.
+        #[arg(long)]
+        force: bool,
+        /// List every sound extracted.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -113,6 +131,118 @@ fn main() -> Result<()> {
             ceiling,
             force,
         } => pup_apply(&path, band, ceiling, force),
+        Command::Extract {
+            table,
+            out_dir,
+            force,
+            verbose,
+        } => extract(&table, out_dir, force, verbose),
+    }
+}
+
+/// Extract a table's sounds and summarize what came out.
+fn extract(table: &Path, out_dir: Option<PathBuf>, force: bool, verbose: bool) -> Result<()> {
+    let out_dir = out_dir.unwrap_or_else(|| table_sounds::default_out_dir(table));
+    let started = Instant::now();
+    let manifest = table_sounds::extract(table, &out_dir, force)?;
+    let elapsed = started.elapsed();
+
+    println!(
+        "{}: {} sounds in {:.2} s -> {}",
+        manifest.table,
+        manifest.sounds.len(),
+        elapsed.as_secs_f64(),
+        out_dir.display()
+    );
+    if verbose {
+        println!();
+        for sound in &manifest.sounds {
+            let duration = sound
+                .duration_s
+                .map(|d| format!("{d:>8.2} s"))
+                .unwrap_or_else(|| "       ? s".to_string());
+            let output = match sound.output_target {
+                OutputTarget::Table => "table",
+                OutputTarget::Backglass => "backglass",
+            };
+            println!(
+                "  {:>4} {:<40} {:<17} {duration}  vol {:>+4}  {output}",
+                sound.index,
+                sound.file,
+                sound.describe_format(),
+                sound.volume,
+            );
+        }
+        println!();
+    }
+    report_extraction(&manifest);
+    println!(
+        "  manifest          {}",
+        out_dir.join(MANIFEST_FILE).display()
+    );
+    Ok(())
+}
+
+/// Print what an extraction holds, and what deserves a second look.
+fn report_extraction(manifest: &Manifest) {
+    let mut formats: BTreeMap<String, usize> = BTreeMap::new();
+    for sound in &manifest.sounds {
+        *formats.entry(sound.describe_format()).or_default() += 1;
+    }
+    for (format, count) in &formats {
+        println!("  {format:<17} {count:>7}");
+    }
+
+    let total: f64 = manifest.sounds.iter().filter_map(|s| s.duration_s).sum();
+    println!("  {:<17} {total:>7.1} s", "duration");
+
+    let undecodable: Vec<_> = manifest
+        .sounds
+        .iter()
+        .filter(|s| s.decode_error.is_some())
+        .collect();
+    println!("  {:<17} {:>7}", "undecodable", undecodable.len());
+    for sound in undecodable {
+        println!(
+            "    {}: {}",
+            sound.file,
+            sound.decode_error.as_deref().unwrap_or_default()
+        );
+    }
+
+    let off_header = manifest
+        .sounds
+        .iter()
+        .filter(|s| s.declared_frames.is_some() && s.frames.is_some())
+        .filter(|s| s.declared_frames != s.frames)
+        .count();
+    if off_header > 0 {
+        println!(
+            "  {:<17} {off_header:>7}  decoded to a frame count their header does not announce",
+            "off their header"
+        );
+    }
+    let shadowed = manifest
+        .sounds
+        .iter()
+        .filter(|s| s.shadowed_by.is_some())
+        .count();
+    if shadowed > 0 {
+        println!(
+            "  {:<17} {shadowed:>7}  an earlier sound has the same name, PlaySound never reaches these",
+            "shadowed"
+        );
+    }
+    let misnamed = manifest
+        .sounds
+        .iter()
+        .filter(|s| s.path_disagrees())
+        .count();
+    if misnamed > 0 {
+        println!(
+            "  {:<17} {misnamed:>7}  content is not the format the import path names",
+            "misnamed"
+        );
     }
 }
 

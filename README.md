@@ -61,10 +61,25 @@ loudness pup-scan "path/to/pupvideos/jumanji"
 
 # PUP: write the corrected volumes into triggers.pup
 loudness pup-apply "path/to/pupvideos/jumanji"
+
+# Table samples: take the sounds a .vpx carries out into a folder (reads only)
+loudness extract "path/to/Attack from Mars LE.vpx"
 ```
 
 Both `apply` commands keep the original as `.bak` and drop a `loudness.json`
 next to the pack recording what was measured and what was written.
+
+`extract` writes one file per sound into `Attack from Mars LE.sounds/` next to
+the table (or the folder given as a second argument), plus a `sounds.json`
+listing, in table order, each sound's name, file, format, exact frame count,
+the volume, pan and fade set in the sound manager, and a BLAKE3 of the file. A
+WAV gets its RIFF header rebuilt around the stored samples, any other format is
+written byte for byte; nothing is re-encoded. On 15 tables: 3,172 sounds and
+3.5 hours of audio, none undecodable, 10.6 s for the largest (Terrifier, 515
+sounds). Every WAV decodes to the frame count its header announces, and the mp3
+and ogg counts match ffmpeg's to the frame. Ten of those sounds share their name
+with an earlier one; `PlaySound` takes the first, so they never play, and the
+manifest marks them.
 
 Useful flags: `--target` and `--ceiling` for AltSound, `--band` for how far a
 PUP clip may sit from the median before it is corrected, `--force` to redo work
