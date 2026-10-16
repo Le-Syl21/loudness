@@ -28,6 +28,9 @@ csv = "1.4.0"
 clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+ctrlc = "3.5.2"
+# Live metering of what VPX actually plays. Not on crates.io yet: pinned to a commit.
+output-decibel-meter = { git = "https://github.com/Le-Syl21/output-decibel-meter", rev = "c0cc7da8f7ffef87f787aba2ed80ad3e1a7bb3e2" }
 
 [lints.rust]
 missing_docs = "warn"

@@ -21,6 +21,8 @@ pub struct Measurement {
     pub true_peak_dbtp: f64,
     /// Frames measured, so callers can tell an empty file from a silent one.
     pub frames: u64,
+    /// Frames per second of the measured stream.
+    pub sample_rate: u32,
 }
 
 /// Accumulates R128 state across several files.
@@ -94,6 +96,7 @@ impl SourceMeter {
             lra: single.loudness_range()?,
             true_peak_dbtp,
             frames,
+            sample_rate: spec.sample_rate,
         })
     }
 
@@ -108,6 +111,7 @@ impl SourceMeter {
             lra: meter.loudness_range()?,
             true_peak_dbtp: self.peak_dbtp,
             frames: self.frames,
+            sample_rate: self.spec.map(|(_, rate)| rate).unwrap_or(0),
         }))
     }
 

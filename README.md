@@ -61,7 +61,18 @@ loudness pup-scan "path/to/pupvideos/jumanji"
 
 # PUP: write the corrected volumes into triggers.pup
 loudness pup-apply "path/to/pupvideos/jumanji"
+
+# Any audio file: its loudness, range and true peak
+loudness meter path/to/sound.wav
+
+# Live: what VPX plays, tapped before the mix (or --device, or the system output)
+loudness monitor --pid "$(pidof VPinballX_BGFX)" --seconds 600
 ```
+
+`monitor` is what tells whether a change was heard: play a game before and
+after, and compare the integrated figures. The capture comes from
+[output-decibel-meter](https://github.com/Le-Syl21/output-decibel-meter);
+`--pid` needs PipeWire on Linux.
 
 Both `apply` commands keep the original as `.bak` and drop a `loudness.json`
 next to the pack recording what was measured and what was written.
@@ -110,5 +121,7 @@ an unrelated crate costs nobody anything.
 cargo build --release
 ```
 
-Pure Rust, no native dependency: [Symphonia](https://github.com/pdeljanov/Symphonia)
-for decoding, [ebur128](https://github.com/sdroege/ebur128) for the measurement.
+[Symphonia](https://github.com/pdeljanov/Symphonia) for decoding,
+[ebur128](https://github.com/sdroege/ebur128) for the measurement. On Linux the
+live capture links PipeWire and ALSA, so the build wants their headers and clang
+(`libpipewire-0.3-dev libasound2-dev clang` on Debian and Ubuntu).

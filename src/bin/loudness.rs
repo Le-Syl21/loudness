@@ -1,6 +1,9 @@
 //! Command line front end: measure an AltSound pack, and optionally correct it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -13,6 +16,8 @@ use loudness::pup::{MAX_VOLUME, PupPack};
 use loudness::pup_measure::{SkipCounts, TriggerLevel};
 use loudness::stamp::{self, Stamp};
 use loudness::{pup_gain, pup_measure};
+use output_decibel_meter::capture;
+use output_decibel_meter::meter::{Meter, Reading};
 
 #[derive(Parser)]
 #[command(version, about = "EBU R128 loudness normalization for Visual Pinball")]
@@ -56,6 +61,35 @@ enum Command {
         /// Measure and write again even if nothing has changed.
         #[arg(long)]
         force: bool,
+    },
+    /// Watch what actually leaves the speakers, live.
+    ///
+    /// Captures a program or an output and prints the loudness as it plays,
+    /// so a change can be judged on what is heard rather than on what a file
+    /// contains. The capture itself is output-decibel-meter's.
+    Monitor {
+        /// Part of a source name. Defaults to the system output, captured in
+        /// loopback.
+        #[arg(long, conflicts_with = "pid")]
+        device: Option<String>,
+        /// Meter what this process plays, before the mix: VPX alone, whatever
+        /// else the machine is playing.
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Stop after this many seconds. Runs until Ctrl+C when absent.
+        #[arg(long)]
+        seconds: Option<f64>,
+        /// List the devices that can be metered and exit.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Measure any audio file and print its EBU R128 figures.
+    ///
+    /// Used as a sound level meter on a captured output: record what the
+    /// speakers receive, then read what it actually measures.
+    Meter {
+        /// Audio file to measure.
+        path: PathBuf,
     },
     /// Measure a PUP pack and report how spread out its clips are. Reads only.
     PupScan {
@@ -102,6 +136,13 @@ fn main() -> Result<()> {
             allow_missing,
             force,
         } => apply(&path, target, ceiling, &cache, allow_missing, force),
+        Command::Meter { path } => meter(&path),
+        Command::Monitor {
+            device,
+            pid,
+            seconds,
+            list,
+        } => monitor_output(device.as_deref(), pid, seconds, list),
         Command::PupScan {
             path,
             band,
@@ -114,6 +155,95 @@ fn main() -> Result<()> {
             force,
         } => pup_apply(&path, band, ceiling, force),
     }
+}
+
+/// Meter what the speakers receive.
+fn monitor_output(
+    device: Option<&str>,
+    pid: Option<u32>,
+    seconds: Option<f64>,
+    list: bool,
+) -> Result<()> {
+    if list {
+        for s in capture::sources()? {
+            let pid = s.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+            println!(
+                "  {} {}{pid}",
+                if s.is_output { "[out]" } else { "[in ]" },
+                s.name
+            );
+        }
+        return Ok(());
+    }
+
+    let source = match (pid, device) {
+        (Some(pid), _) => capture::from_process(pid)?
+            .into_iter()
+            .next()
+            .with_context(|| format!("process {pid} is not playing anything that can be tapped"))?,
+        (None, Some(fragment)) => capture::find(fragment)?,
+        (None, None) => capture::default_output()?,
+    };
+    println!(
+        "metering {} ({})",
+        source.name,
+        if source.is_output {
+            "output, captured in loopback"
+        } else {
+            "input"
+        }
+    );
+
+    let capture = source.open()?;
+    let mut meter = Meter::new(capture.channels, capture.sample_rate)?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let on_signal = Arc::clone(&stop);
+    let _ = ctrlc::set_handler(move || on_signal.store(true, Ordering::Relaxed));
+
+    // Wall clock, so a source that hands over nothing cannot hold --seconds open.
+    let started = Instant::now();
+    let limit = seconds.map(Duration::from_secs_f64);
+    let mut shown = 0.0;
+    let mut last = Reading::default();
+    while !stop.load(Ordering::Relaxed) && !limit.is_some_and(|l| started.elapsed() >= l) {
+        let Some(block) = capture.next_block(Duration::from_millis(200)) else {
+            continue;
+        };
+        last = meter.add(&block)?;
+        // One line per second is enough to follow by eye.
+        if last.seconds - shown >= 1.0 {
+            shown = last.seconds;
+            println!(
+                "  {:>6.1}s   M {:>6.1}   S {:>6.1}   I {:>6.1} LUFS   peak {:>6.1} dBTP",
+                last.seconds, last.momentary, last.short_term, last.integrated, last.true_peak
+            );
+        }
+    }
+
+    if last.seconds == 0.0 {
+        bail!("{} handed over no audio at all", source.name);
+    }
+    println!("\nover {:.1} s of audio", last.seconds);
+    println!("  integrated  {:>8.1} LUFS", last.integrated);
+    println!("  true peak   {:>8.1} dBTP", last.true_peak);
+    Ok(())
+}
+
+/// Measure one file and print what R128 says about it.
+fn meter(path: &Path) -> Result<()> {
+    let mut source = SourceMeter::new();
+    let m = source.add_file(path)?;
+    println!("{}", path.display());
+    println!("  loudness    {:>8.1} LUFS", m.lufs);
+    println!("  range       {:>8.1} LU", m.lra);
+    println!("  true peak   {:>8.1} dBTP", m.true_peak_dbtp);
+    println!(
+        "  duration    {:>8.1} s  ({} Hz)",
+        m.frames as f64 / m.sample_rate.max(1) as f64,
+        m.sample_rate
+    );
+    Ok(())
 }
 
 /// Measure a PUP pack and describe how spread out it is.
