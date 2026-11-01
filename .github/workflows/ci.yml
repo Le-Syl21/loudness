@@ -1,0 +1,41 @@
+name: CI
+
+# No build on a push to main: the work lands there directly and is built
+# locally. The gates run on pull requests, on tags and on demand.
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+
+      # output-decibel-meter reads the audio system: ALSA and PipeWire.
+      - name: System libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libclang-dev
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-features
