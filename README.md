@@ -90,7 +90,7 @@ that is already done, `--verbose` to list every file measured.
 | PinMAME rom | `AudioSource.pinmame.Gain` per table | *not implemented yet* |
 | Table samples | `AudioSource.<id>.Gain` per table | *not implemented yet*, they live inside the `.vpx` |
 
-`AudioSource.<id>.Gain` is a VPX 10.8.1 feature, which is what this targets.
+`AudioSource.<id>.Gain` is a VPX 10.9.0 feature (developed as 10.8.1, renamed before release), which is what this targets.
 
 ## Not covered
 
